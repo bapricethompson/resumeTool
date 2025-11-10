@@ -95,8 +95,8 @@ class QueryJobsDatabaseTool extends StructuredTool {
           // fields to return
           $project: {
             _id: 0,
-            disease: 1,
-            description: 1,
+            jobTitle: "$Job Title",
+            jobDescription: "$Job Description",
             score: { $meta: "vectorSearchScore" },
           },
         },
@@ -297,6 +297,48 @@ Return your response as a JSON object with this structure:
   }
 }
 
+class ResumeQualityTool extends StructuredTool {
+  name = "ResumeQuality";
+  description =
+    "Evaluate the quality of a resume, including completeness, clarity, formatting, and keyword usage. Suggest improvements if needed.";
+
+  schema = z.object({
+    resumeData: z
+      .string()
+      .describe("Structured JSON or text summary of the candidate's resume."),
+  });
+
+  async _call({ resumeData }) {
+    const prompt = `
+You are an expert career consultant. Assess the quality of the following resume:
+
+Resume Data:
+"""
+${resumeData}
+"""
+
+Provide:
+- A score between 0 and 100 for overall quality.
+- A short explanation for the score.
+- Three specific areas where the resume could be improved (e.g., missing skills, formatting issues, unclear experience).
+- Recommendations for next steps the candidate should take to improve the resume.
+
+Return as JSON with this structure:
+{
+  "quality_score": 0-100,
+  "explanation": "",
+  "improvement_areas": ["", "", ""],
+  "recommendations": ["", "", ""]
+}
+`;
+
+    const response = await llm.invoke([new HumanMessage(prompt)]);
+    return response.content;
+  }
+}
+
+const resumeQualityTool = new ResumeQualityTool();
+
 const extractResumeTool = new ExtractResumeTool();
 const queryJobsDatabaseTool = new QueryJobsDatabaseTool();
 const assessJobFitTool = new AssessJobFitTool();
@@ -315,6 +357,7 @@ const llm = new ChatOpenAI({
     assessJobFitTool,
     adviceTool,
     summarizeJobSuggestionsTool,
+    resumeQualityTool,
   ],
 });
 
@@ -325,10 +368,14 @@ const embeddings = new OllamaEmbeddings({
 
 const graphStateData = {
   userInput: "",
+  desireJob: "",
+  desireDuties: "",
   resumeData: "",
   jobResults: [],
   assessmentResults: "",
   advice: "",
+  queryResults: null,
+  resumeQuality: null,
 };
 
 async function queryJobsNode(state) {
@@ -376,14 +423,10 @@ async function queryJobsNode(state) {
 }
 
 async function extractResumeNode(state) {
-  console.log("Extract RESUME STATE:", state);
-
   // Call your tool
   const resumeResult = await extractResumeTool.invoke({
     resumeText: state.userInput,
   });
-
-  console.log("Extracted résumé data:", resumeResult);
 
   // Update graph state
   return {
@@ -391,20 +434,168 @@ async function extractResumeNode(state) {
     resumeData: resumeResult,
   };
 }
+async function resumeQualityNode(state) {
+  console.log("RESUME QUALITY STATE:", state);
+
+  if (!state.resumeData) {
+    console.error("No resume data available.");
+    return state;
+  }
+
+  const qualityAssessment = await resumeQualityTool.invoke({
+    resumeData: state.resumeData,
+  });
+
+  console.log("RESUME QUALITY ASSESSMENT:", qualityAssessment);
+
+  // Optionally, branch based on quality_score later
+  return {
+    ...state,
+    resumeQuality: qualityAssessment,
+  };
+}
+
+async function assessFitNode(state) {
+  console.log("ASSESS FIT STATE:", state);
+
+  if (!state.resumeData || !state.queryResults?.length) {
+    console.error("Missing resume or job results.");
+    return state;
+  }
+
+  // Compare resume to the top job description
+  const topJob = state.queryResults[0];
+  const assessment = await assessJobFitTool.invoke({
+    resumeData: state.resumeData,
+    jobDescription: topJob.jobDescription,
+  });
+
+  // Get career advice
+  const advice = await adviceTool.invoke({
+    assessmentResults: assessment,
+    resumeData: state.resumeData,
+  });
+
+  return {
+    ...state,
+    assessmentResults: assessment,
+    advice: advice,
+  };
+}
+
+async function incompleteResumeNode(state) {
+  console.log("INCOMPLETE RESUME NODE STATE:", state);
+
+  if (!state.resumeQuality) {
+    console.error("No resume quality assessment available.");
+    return state;
+  }
+
+  // Parse quality score and recommendations (assuming JSON string from LLM)
+  let quality;
+  try {
+    quality = JSON.parse(state.resumeQuality);
+  } catch (err) {
+    console.error("Failed to parse resume quality:", err);
+    return state;
+  }
+
+  // Only trigger if score is low
+  if (quality.quality_score < 70) {
+    const improvementMessage = `
+Your resume quality score is ${quality.quality_score}/100.
+Areas to improve: ${quality.improvement_areas.join(", ")}.
+Recommendations: ${quality.recommendations.join("; ")}.
+Consider updating your resume before continuing to job applications.
+`;
+
+    console.log("Incomplete resume feedback:", improvementMessage);
+
+    return {
+      ...state,
+      incompleteResumeFeedback: improvementMessage,
+      canProceed: false, // flag to prevent moving forward
+    };
+  } else {
+    return {
+      ...state,
+      canProceed: true,
+    };
+  }
+}
+
+function routingFunction(state) {
+  console.log("ROUTING FUNCTION STATE:", state);
+
+  if (!state.resumeQuality) {
+    console.warn("No resume quality available, defaulting to 'queryJobsNode'");
+    return "queryJobsNode";
+  }
+
+  let qualityObj = state.resumeQuality;
+
+  // If resumeQuality is a string (possibly from LLM), clean and parse it
+  if (typeof qualityObj === "string") {
+    try {
+      const cleaned = qualityObj
+        .trim()
+        .replace(/^```json\s*/, "")
+        .replace(/```$/, "");
+      qualityObj = JSON.parse(cleaned);
+    } catch (err) {
+      console.error(
+        "Failed to parse resumeQuality JSON, defaulting to queryJobsNode:",
+        err
+      );
+      return "queryJobsNode";
+    }
+  }
+
+  // Check quality score safely
+  const score = qualityObj.quality_score;
+  if (typeof score !== "number") {
+    console.warn(
+      "Quality score is missing or invalid, defaulting to 'queryJobsNode'"
+    );
+    return "queryJobsNode";
+  }
+
+  // Routing based on score
+  if (score <= 70) {
+    return "incompleteResumeNode";
+  } else {
+    return "queryJobsNode";
+  }
+}
 
 const workflow = new StateGraph({ channels: graphStateData });
 workflow.addNode("extractResumeNode", extractResumeNode);
+workflow.addNode("resumeQualityNode", resumeQualityNode);
 workflow.addNode("queryJobsNode", queryJobsNode);
+workflow.addNode("assessFitNode", assessFitNode);
+workflow.addNode("incompleteResumeNode", incompleteResumeNode);
 
-// Define flow between nodes
 workflow.addEdge(START, "extractResumeNode");
-workflow.addEdge("extractResumeNode", "queryJobsNode");
-workflow.addEdge("queryJobsNode", END);
+workflow.addEdge("extractResumeNode", "resumeQualityNode");
+workflow.addConditionalEdges("resumeQualityNode", routingFunction, [
+  "incompleteResumeNode",
+  "queryJobsNode",
+]);
+
+workflow.addEdge("queryJobsNode", "assessFitNode");
+workflow.addEdge("assessFitNode", END);
+workflow.addEdge("incompleteResumeNode", END);
 
 const graph = workflow.compile();
 
 app.post("/upload-resume", upload.single("resume"), async (req, res) => {
   try {
+    const { jobTitle, duties } = req.body;
+    if (!jobTitle || !duties) {
+      return res
+        .status(400)
+        .json({ error: "Job title and duties are required." });
+    }
     if (!req.file) {
       return res.status(400).json({ error: "No resume file uploaded." });
     }
@@ -414,11 +605,11 @@ app.post("/upload-resume", upload.single("resume"), async (req, res) => {
     const pdfData = await pdfParse(pdfBuffer);
     const resumeText = pdfData.text;
 
-    console.log("Extracted resume text:", resumeText.slice(0, 300));
-
     // Run your agent graph starting with the extracted text
     const result = await graph.invoke({
       userInput: resumeText, // feeds into extractResumeNode
+      desireDuties: duties,
+      desireJob: jobTitle,
     });
 
     console.log("GRAPH RESULT:", result);
