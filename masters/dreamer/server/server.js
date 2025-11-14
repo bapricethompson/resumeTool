@@ -32,6 +32,9 @@ const OLLAMA_BASE_URL = "http://100.64.0.1:11434";
 const EMBEDDING_FIELD = "description_embedding_qwen3";
 const INDEX_NAME = "vector_index";
 
+const EMBEDDING_FIELD_TITLE = "title_embedding_qwen3";
+const INDEX_NAME_TITLE = "vector_index_1";
+
 const LLM_MODEL = "gpt-oss:20b";
 const EMBEDDING_MODEL = "qwen3-embedding";
 
@@ -68,13 +71,13 @@ class QueryJobsDatabaseTool extends StructuredTool {
   async _call({ numResults, query }) {
     try {
       await mongoClient.connect();
-      console.log("Connected to MongoDB");
+      //console.log("Connected to MongoDB");
 
       const db = mongoClient.db(DB_NAME);
       const collection = db.collection(COLLECTION_NAME);
 
       // generate an embedding for the search query
-      console.log(`Generating embedding for: "${query}"`);
+      //console.log(`Generating embedding for: "${query}"`);
       const queryVector = await embeddings.embedQuery(query);
       const vectorBinary = Binary.fromFloat32Array(
         new Float32Array(queryVector)
@@ -103,7 +106,7 @@ class QueryJobsDatabaseTool extends StructuredTool {
       ];
 
       // execute the query
-      console.log("Searching for similar jobs...");
+      //console.log("Searching for similar jobs...");
       const results = await collection.aggregate(pipeline).toArray();
 
       return results;
@@ -112,7 +115,75 @@ class QueryJobsDatabaseTool extends StructuredTool {
       return [];
     } finally {
       await mongoClient.close();
-      console.log("Disconnected from MongoDB");
+      //console.log("Disconnected from MongoDB");
+    }
+  }
+}
+
+class QueryTitlesDatabaseTool extends StructuredTool {
+  name = "QueryTitlesDatabase";
+  description =
+    "Query jobs database to find relevant job listings based on a job title.";
+
+  schema = z.object({
+    numResults: z.number().describe("The number of search results to return."),
+    query: z
+      .string()
+      .describe(
+        "The search query: perhaps a job description or general job idea."
+      ),
+  });
+
+  async _call({ numResults, query }) {
+    try {
+      await mongoClient.connect();
+      //console.log("Connected to MongoDB");
+
+      console.log("QUERY TITLES DATABASE TOOL INVOKED");
+
+      const db = mongoClient.db(DB_NAME);
+      const collection = db.collection(COLLECTION_NAME);
+
+      // generate an embedding for the search query
+      //console.log(`Generating embedding for: "${query}"`);
+      const queryVector = await embeddings.embedQuery(query);
+      const vectorBinary = Binary.fromFloat32Array(
+        new Float32Array(queryVector)
+      );
+
+      // define the vector search pipeline
+      const pipeline = [
+        {
+          $vectorSearch: {
+            index: INDEX_NAME_TITLE,
+            path: EMBEDDING_FIELD_TITLE,
+            queryVector: vectorBinary,
+            numCandidates: 100, // number of candidates to consider
+            limit: numResults, // number of top results to return
+          },
+        },
+        {
+          // fields to return
+          $project: {
+            _id: 0,
+            jobTitle: "$Job Title",
+            jobDescription: "$Job Description",
+            score: { $meta: "vectorSearchScore" },
+          },
+        },
+      ];
+
+      // execute the query
+      //console.log("Searching for similar jobs...");
+      const results = await collection.aggregate(pipeline).toArray();
+
+      return results;
+    } catch (error) {
+      console.error("An error occurred:", error);
+      return [];
+    } finally {
+      await mongoClient.close();
+      //console.log("Disconnected from MongoDB");
     }
   }
 }
@@ -136,8 +207,8 @@ class SummarizeJobSuggestionsTool extends StructuredTool {
 
   async _call({ summary, suspectedJob }) {
     // You could store or log this if needed
-    console.log("Top suspected job:", suspectedJob);
-    console.log("Summary for user:", summary);
+    //("Top suspected job:", suspectedJob);
+    //console.log("Summary for user:", summary);
     return { summary, suspectedJob };
   }
 }
@@ -344,6 +415,7 @@ const queryJobsDatabaseTool = new QueryJobsDatabaseTool();
 const assessJobFitTool = new AssessJobFitTool();
 const adviceTool = new AdviceTool();
 const summarizeJobSuggestionsTool = new SummarizeJobSuggestionsTool();
+const queryTitlesDatabaseTool = new QueryTitlesDatabaseTool();
 
 const llm = new ChatOpenAI({
   apiKey: "",
@@ -358,6 +430,7 @@ const llm = new ChatOpenAI({
     adviceTool,
     summarizeJobSuggestionsTool,
     resumeQualityTool,
+    queryTitlesDatabaseTool,
   ],
 });
 
@@ -379,13 +452,13 @@ const graphStateData = {
 };
 
 async function queryJobsNode(state) {
-  console.log("Query JOBS STATE:", state);
+  //console.log("Query JOBS STATE:", state);
 
   const toolResult = await queryJobsDatabaseTool.invoke({
     query: state.userInput,
     numResults: 5,
   });
-  console.log("TOOL RESULT:", toolResult);
+  //console.log("TOOL RESULT:", toolResult);
 
   //   const message = new HumanMessage({
   //     content: [
@@ -421,6 +494,44 @@ async function queryJobsNode(state) {
     suspectedJob: summarized.suspectedJob,
   };
 }
+async function queryJobTitlesNode(state) {
+  console.log("QUERY JOB TITLES NODE:", state);
+
+  if (!state.desireJob) {
+    console.warn("No desired job provided. Skipping title search.");
+    return state;
+  }
+
+  // Call the job-title embedding search tool
+  const toolResult = await queryTitlesDatabaseTool.invoke({
+    query: state.desireJob,
+    numResults: 5,
+  });
+
+  // Format top titles similar to your other summarization pattern
+  const topJobs = toolResult
+    .slice(0, 3)
+    .map(
+      (r, i) => `${i + 1}. ${r.jobTitle} (score ${(r.score * 100).toFixed(1)}%)`
+    )
+    .join("\n");
+
+  const summaryText = `Top matching job titles for "${state.desireJob}":\n${topJobs}`;
+  const suspectedJob = toolResult[0]?.jobTitle || "Unknown job";
+
+  // Use your summarization tool
+  const summarized = await summarizeJobSuggestionsTool.invoke({
+    summary: summaryText,
+    suspectedJob,
+  });
+
+  return {
+    ...state,
+    queryResults: toolResult,
+    summary: summarized.summary,
+    suspectedJob: summarized.suspectedJob,
+  };
+}
 
 async function extractResumeNode(state) {
   // Call your tool
@@ -435,7 +546,7 @@ async function extractResumeNode(state) {
   };
 }
 async function resumeQualityNode(state) {
-  console.log("RESUME QUALITY STATE:", state);
+  //console.log("RESUME QUALITY STATE:", state);
 
   if (!state.resumeData) {
     console.error("No resume data available.");
@@ -484,8 +595,6 @@ async function assessFitNode(state) {
 }
 
 async function incompleteResumeNode(state) {
-  console.log("INCOMPLETE RESUME NODE STATE:", state);
-
   if (!state.resumeQuality) {
     console.error("No resume quality assessment available.");
     return state;
@@ -509,7 +618,7 @@ Recommendations: ${quality.recommendations.join("; ")}.
 Consider updating your resume before continuing to job applications.
 `;
 
-    console.log("Incomplete resume feedback:", improvementMessage);
+    //console.log("Incomplete resume feedback:", improvementMessage);
 
     return {
       ...state,
@@ -525,11 +634,15 @@ Consider updating your resume before continuing to job applications.
 }
 
 function routingFunction(state) {
-  console.log("ROUTING FUNCTION STATE:", state);
+  //console.log("ROUTING FUNCTION STATE:", state);
 
   if (!state.resumeQuality) {
     console.warn("No resume quality available, defaulting to 'queryJobsNode'");
-    return "queryJobsNode";
+    if (state.desireJob && state.desireJob.trim() !== "") {
+      return "queryJobTitlesNode";
+    } else {
+      return "queryJobsNode";
+    }
   }
 
   let qualityObj = state.resumeQuality;
@@ -547,7 +660,11 @@ function routingFunction(state) {
         "Failed to parse resumeQuality JSON, defaulting to queryJobsNode:",
         err
       );
-      return "queryJobsNode";
+      if (state.desireJob && state.desireJob.trim() !== "") {
+        return "queryJobTitlesNode";
+      } else {
+        return "queryJobsNode";
+      }
     }
   }
 
@@ -574,13 +691,17 @@ workflow.addNode("resumeQualityNode", resumeQualityNode);
 workflow.addNode("queryJobsNode", queryJobsNode);
 workflow.addNode("assessFitNode", assessFitNode);
 workflow.addNode("incompleteResumeNode", incompleteResumeNode);
+workflow.addNode("queryJobTitlesNode", queryJobTitlesNode);
 
 workflow.addEdge(START, "extractResumeNode");
 workflow.addEdge("extractResumeNode", "resumeQualityNode");
 workflow.addConditionalEdges("resumeQualityNode", routingFunction, [
   "incompleteResumeNode",
+  "queryJobTitlesNode",
   "queryJobsNode",
 ]);
+
+workflow.addEdge("queryJobTitlesNode", "assessFitNode");
 
 workflow.addEdge("queryJobsNode", "assessFitNode");
 workflow.addEdge("assessFitNode", END);
