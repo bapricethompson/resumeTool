@@ -404,7 +404,13 @@ Return as JSON with this structure:
 `;
 
     const response = await llm.invoke([new HumanMessage(prompt)]);
-    return response.content;
+    const cleaned = response.content
+      .trim()
+      .replace(/^```json/i, "")
+      .replace(/```$/i, "")
+      .trim();
+
+    return cleaned;
   }
 }
 
@@ -449,10 +455,13 @@ const graphStateData = {
   advice: "",
   queryResults: null,
   resumeQuality: null,
+  lowFitAdvice: "",
+  mediumFitAdvice: "",
+  highFitAdvice: "",
 };
 
 async function queryJobsNode(state) {
-  //console.log("Query JOBS STATE:", state);
+  console.log("Query JOBS");
 
   const toolResult = await queryJobsDatabaseTool.invoke({
     query: state.userInput,
@@ -495,7 +504,7 @@ async function queryJobsNode(state) {
   };
 }
 async function queryJobTitlesNode(state) {
-  console.log("QUERY JOB TITLES NODE:", state);
+  console.log("QUERY JOB TITLES NODE:");
 
   if (!state.desireJob) {
     console.warn("No desired job provided. Skipping title search.");
@@ -546,7 +555,7 @@ async function extractResumeNode(state) {
   };
 }
 async function resumeQualityNode(state) {
-  //console.log("RESUME QUALITY STATE:", state);
+  console.log("RESUME QUALITY STATE:");
 
   if (!state.resumeData) {
     console.error("No resume data available.");
@@ -567,7 +576,7 @@ async function resumeQualityNode(state) {
 }
 
 async function assessFitNode(state) {
-  console.log("ASSESS FIT STATE:", state);
+  console.log("ASSESS FIT STATE:");
 
   if (!state.resumeData || !state.queryResults?.length) {
     console.error("Missing resume or job results.");
@@ -595,17 +604,27 @@ async function assessFitNode(state) {
 }
 
 async function incompleteResumeNode(state) {
+  console.log("INCOMPLETE RESUME NODE STATE:");
   if (!state.resumeQuality) {
     console.error("No resume quality assessment available.");
     return state;
   }
 
   // Parse quality score and recommendations (assuming JSON string from LLM)
+  let qualityRaw = state.resumeQuality;
+
+  // Normalize any code fences
+  const cleaned = qualityRaw
+    .trim()
+    .replace(/^```json/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
   let quality;
   try {
-    quality = JSON.parse(state.resumeQuality);
+    quality = JSON.parse(cleaned);
   } catch (err) {
-    console.error("Failed to parse resume quality:", err);
+    console.error("Failed to parse cleaned resume quality JSON:", err);
     return state;
   }
 
@@ -631,6 +650,103 @@ Consider updating your resume before continuing to job applications.
       canProceed: true,
     };
   }
+}
+
+async function lowFitNode(state) {
+  console.log("LOW FIT NODE STATE:");
+  let assessment = JSON.parse(
+    state.assessmentResults
+      .replace(/^```json/i, "")
+      .replace(/```$/i, "")
+      .trim()
+  );
+
+  const score = assessment.match_score;
+
+  if (score < 25) {
+    const toolResult = await queryJobsDatabaseTool.invoke({
+      query: state.resumeData,
+      numResults: 5,
+    });
+
+    return {
+      ...state,
+      lowFitAdvice: `
+Your match score for the desired job was very low (${score}/100).
+Here are jobs you may be a much better fit for:
+
+${toolResult
+  .map((r, i) => `${i + 1}. ${r.jobTitle} — ${(r.score * 100).toFixed(1)}%`)
+  .join("\n")}
+`,
+    };
+  }
+
+  const prompt = `
+Create a career plan for someone who wants to become a "${state.desireJob}" but currently has a low fit score based on this resume ${state.resumeData}.
+
+Assessment:
+${state.assessmentResults}
+
+Return a friendly plan with:
+- Required skills they are missing
+- Certifications or courses to take
+- 6-month roadmap
+- 1–2 entry-level roles to transition through
+`;
+
+  const result = await llm.invoke([new HumanMessage(prompt)]);
+
+  return {
+    ...state,
+    lowFitAdvice: result.content,
+  };
+}
+
+async function mediumFitNode(state) {
+  console.log("MEDIUM FIT NODE STATE:");
+  const prompt = `
+The candidate has a medium match score for "${state.desireJob}".
+
+Assessment:
+${state.assessmentResults}
+
+Provide:
+- Top areas they should improve
+- Specific skills to add
+- Concrete resume fixes
+- Small steps to raise match score into the "high fit" range
+`;
+
+  const result = await llm.invoke([new HumanMessage(prompt)]);
+
+  return {
+    ...state,
+    mediumFitAdvice: result.content,
+  };
+}
+
+async function highFitNode(state) {
+  console.log("HIGH FIT NODE STATE:");
+  const prompt = `
+The candidate has a high match score for "${state.desireJob}".
+
+Assessment:
+${state.assessmentResults}
+
+Provide:
+- A short congratulations message
+- Next steps to apply
+- Interview prep checklist
+- How to tailor their resume, ${state.resumeData} for final polish
+`;
+
+  const result = await llm.invoke([new HumanMessage(prompt)]);
+
+  return {
+    ...state,
+    highFitAdvice: result.content,
+  };
 }
 
 function routingFunction(state) {
@@ -678,11 +794,37 @@ function routingFunction(state) {
   }
 
   // Routing based on score
-  if (score <= 70) {
+  if (score <= 50) {
     return "incompleteResumeNode";
   } else {
     return "queryJobsNode";
   }
+}
+
+function fitRoutingFunction(state) {
+  let assessmentRaw = state.assessmentResults;
+  console.log("HERE IN FIT ROUTING FUNCTION");
+
+  // Clean JSON fences
+  const cleaned = assessmentRaw
+    .trim()
+    .replace(/^```json/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  let assessment;
+  try {
+    assessment = JSON.parse(cleaned);
+  } catch (err) {
+    console.error("Failed to parse assessment JSON:", err);
+    return "mediumFitNode"; // default fallback
+  }
+
+  const score = assessment.match_score;
+
+  if (score < 40) return "lowFitNode";
+  if (score < 75) return "mediumFitNode";
+  return "highFitNode";
 }
 
 const workflow = new StateGraph({ channels: graphStateData });
@@ -692,6 +834,9 @@ workflow.addNode("queryJobsNode", queryJobsNode);
 workflow.addNode("assessFitNode", assessFitNode);
 workflow.addNode("incompleteResumeNode", incompleteResumeNode);
 workflow.addNode("queryJobTitlesNode", queryJobTitlesNode);
+workflow.addNode("lowFitNode", lowFitNode);
+workflow.addNode("mediumFitNode", mediumFitNode);
+workflow.addNode("highFitNode", highFitNode);
 
 workflow.addEdge(START, "extractResumeNode");
 workflow.addEdge("extractResumeNode", "resumeQualityNode");
@@ -704,7 +849,14 @@ workflow.addConditionalEdges("resumeQualityNode", routingFunction, [
 workflow.addEdge("queryJobTitlesNode", "assessFitNode");
 
 workflow.addEdge("queryJobsNode", "assessFitNode");
-workflow.addEdge("assessFitNode", END);
+workflow.addConditionalEdges("assessFitNode", fitRoutingFunction, [
+  "lowFitNode",
+  "mediumFitNode",
+  "highFitNode",
+]);
+workflow.addEdge("lowFitNode", END);
+workflow.addEdge("mediumFitNode", END);
+workflow.addEdge("highFitNode", END);
 workflow.addEdge("incompleteResumeNode", END);
 
 const graph = workflow.compile();
