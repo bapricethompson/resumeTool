@@ -448,7 +448,6 @@ const embeddings = new OllamaEmbeddings({
 const graphStateData = {
   userInput: "",
   desireJob: "",
-  desireDuties: "",
   resumeData: "",
   jobResults: [],
   assessmentResults: "",
@@ -610,10 +609,8 @@ async function incompleteResumeNode(state) {
     return state;
   }
 
-  // Parse quality score and recommendations (assuming JSON string from LLM)
   let qualityRaw = state.resumeQuality;
 
-  // Normalize any code fences
   const cleaned = qualityRaw
     .trim()
     .replace(/^```json/i, "")
@@ -628,7 +625,6 @@ async function incompleteResumeNode(state) {
     return state;
   }
 
-  // Only trigger if score is low
   if (quality.quality_score < 70) {
     const improvementMessage = `
 Your resume quality score is ${quality.quality_score}/100.
@@ -637,12 +633,10 @@ Recommendations: ${quality.recommendations.join("; ")}.
 Consider updating your resume before continuing to job applications.
 `;
 
-    //console.log("Incomplete resume feedback:", improvementMessage);
-
     return {
       ...state,
       incompleteResumeFeedback: improvementMessage,
-      canProceed: false, // flag to prevent moving forward
+      canProceed: false,
     };
   } else {
     return {
@@ -654,6 +648,7 @@ Consider updating your resume before continuing to job applications.
 
 async function lowFitNode(state) {
   console.log("LOW FIT NODE STATE:");
+
   let assessment = JSON.parse(
     state.assessmentResults
       .replace(/^```json/i, "")
@@ -661,6 +656,7 @@ async function lowFitNode(state) {
       .trim()
   );
 
+  console.log("SCORE ASSESSMENT RAW:", assessment.match_score);
   const score = assessment.match_score;
 
   if (score < 25) {
@@ -750,20 +746,8 @@ Provide:
 }
 
 function routingFunction(state) {
-  //console.log("ROUTING FUNCTION STATE:", state);
-
-  if (!state.resumeQuality) {
-    console.warn("No resume quality available, defaulting to 'queryJobsNode'");
-    if (state.desireJob && state.desireJob.trim() !== "") {
-      return "queryJobTitlesNode";
-    } else {
-      return "queryJobsNode";
-    }
-  }
-
+  // Parse resumeQuality if it's a JSON string
   let qualityObj = state.resumeQuality;
-
-  // If resumeQuality is a string (possibly from LLM), clean and parse it
   if (typeof qualityObj === "string") {
     try {
       const cleaned = qualityObj
@@ -776,36 +760,35 @@ function routingFunction(state) {
         "Failed to parse resumeQuality JSON, defaulting to queryJobsNode:",
         err
       );
-      if (state.desireJob && state.desireJob.trim() !== "") {
-        return "queryJobTitlesNode";
-      } else {
-        return "queryJobsNode";
-      }
+      return "queryJobsNode";
     }
   }
 
-  // Check quality score safely
-  const score = qualityObj.quality_score;
+  // Validate quality score
+  const score = qualityObj?.quality_score;
   if (typeof score !== "number") {
-    console.warn(
-      "Quality score is missing or invalid, defaulting to 'queryJobsNode'"
-    );
+    console.warn("Quality score missing/invalid. Defaulting to queryJobsNode");
     return "queryJobsNode";
   }
 
-  // Routing based on score
+  // If quality score is 50 or below, go to incompleteResumeNode
   if (score <= 50) {
     return "incompleteResumeNode";
-  } else {
-    return "queryJobsNode";
   }
+
+  // Only go to job title node if desiredJob is present and quality score is over 50
+  if (state.desireJob && state.desireJob.trim() !== "") {
+    return "queryJobTitlesNode";
+  }
+
+  // Otherwise, go to queryJobsNode
+  return "queryJobsNode";
 }
 
 function fitRoutingFunction(state) {
   let assessmentRaw = state.assessmentResults;
   console.log("HERE IN FIT ROUTING FUNCTION");
 
-  // Clean JSON fences
   const cleaned = assessmentRaw
     .trim()
     .replace(/^```json/i, "")
@@ -817,7 +800,7 @@ function fitRoutingFunction(state) {
     assessment = JSON.parse(cleaned);
   } catch (err) {
     console.error("Failed to parse assessment JSON:", err);
-    return "mediumFitNode"; // default fallback
+    return "mediumFitNode";
   }
 
   const score = assessment.match_score;
@@ -863,26 +846,24 @@ const graph = workflow.compile();
 
 app.post("/upload-resume", upload.single("resume"), async (req, res) => {
   try {
-    const { jobTitle, duties } = req.body;
-    if (!jobTitle || !duties) {
-      return res
-        .status(400)
-        .json({ error: "Job title and duties are required." });
-    }
+    // Remove the required check for desiredJob
+    // const { desiredJob } = req.body;
+    // if (!desiredJob) {
+    //   return res.status(400).json({ error: "Desired job is required." });
+    // }
+    const desiredJob = req.body.desiredJob || ""; // Default to empty string if not provided
+
     if (!req.file) {
       return res.status(400).json({ error: "No resume file uploaded." });
     }
 
-    // 🧠 Extract text from the uploaded PDF
     const pdfBuffer = req.file.buffer;
     const pdfData = await pdfParse(pdfBuffer);
     const resumeText = pdfData.text;
 
-    // Run your agent graph starting with the extracted text
     const result = await graph.invoke({
-      userInput: resumeText, // feeds into extractResumeNode
-      desireDuties: duties,
-      desireJob: jobTitle,
+      userInput: resumeText,
+      desireJob: desiredJob, // Pass empty string if not provided
     });
 
     console.log("GRAPH RESULT:", result);

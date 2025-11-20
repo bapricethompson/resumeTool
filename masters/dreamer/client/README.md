@@ -1,70 +1,44 @@
-# Getting Started with Create React App
+# Resume Radar: Agentic Job Match Analyzer
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+## Overview
 
-## Available Scripts
+Resume Radar is an agent-based web application that analyzes your resume and matches you to relevant job opportunities using advanced AI and semantic search. The system leverages a multi-node agentic workflow, vector embeddings, and a modern React front-end to deliver personalized career insights and recommendations.
 
-In the project directory, you can run:
+---
 
-### `npm start`
+## Problem Domain
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+Job seekers often struggle to understand how well their resume fits specific roles, what skills they lack, and which jobs they are best suited for. Traditional keyword-based matching is limited and fails to capture nuanced fit. Resume Radar solves this by:
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+- Parsing resumes for structured data (skills, experience, education)
+- Using semantic search (RAG) to find jobs and titles that best match your profile
+- Assessing resume quality and job fit
+- Providing actionable advice and improvement recommendations
 
-### `npm test`
+---
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Agentic System Architecture
 
-### `npm run build`
+The backend agent is implemented using LangGraph and consists of several interconnected nodes, each responsible for a distinct reasoning or tool-calling step. The agent maintains a persistent state object, passing it between nodes to track progress and results.
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+### Node Graph
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+```mermaid
+graph TD
+    START --> ExtractResume
+    ExtractResume --> ResumeQuality
+    ResumeQuality -->|score ≤ 50| IncompleteResume
+    ResumeQuality -->|score > 50 & desiredJob| QueryJobTitles
+    ResumeQuality -->|score > 50 & no desiredJob| QueryJobs
+    QueryJobTitles --> AssessFit
+    QueryJobs --> AssessFit
+    AssessFit -->|score < 40| LowFit
+    AssessFit -->|score < 75| MediumFit
+    AssessFit -->|score ≥ 75| HighFit
+    IncompleteResume --> END
+    LowFit --> END
+    MediumFit --> END
+    HighFit --> END
+```
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+---
