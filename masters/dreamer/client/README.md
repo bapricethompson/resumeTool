@@ -65,17 +65,13 @@ The backend is built with LangGraph, implementing a multi-node agentic workflow.
 
 ```mermaid
 graph TD
-START → extractResumeNode → resumeQualityNode → routingFunction:
-    ├─> incompleteResumeNode → END
-    ├─> queryJobTitlesNode → assessFitNode → fitRoutingFunction:
-        ├─> lowFitNode → END
-        ├─> mediumFitNode → END
-        └─> highFitNode → END
-    └─> queryJobsNode → assessFitNode → fitRoutingFunction:
-        ├─> lowFitNode → END
-        ├─> mediumFitNode → END
-        └─> highFitNode → END
-
+    START --> extractResumeNode --> resumeQualityNode --> routingFunction
+    routingFunction --> incompleteResumeNode --> END
+    routingFunction --> queryJobTitlesNode --> assessFitNode --> fitRoutingFunction
+    routingFunction --> queryJobsNode --> assessFitNode --> fitRoutingFunction
+    fitRoutingFunction --> lowFitNode --> END
+    fitRoutingFunction --> mediumFitNode --> END
+    fitRoutingFunction --> highFitNode --> END
 ```
 
 #### Technical Highlights
